@@ -1,11 +1,19 @@
 package com.example.demo.controller;
 
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
+import com.example.demo.utils.HttpUtil;
+import com.example.demo.utils.JWTTokenUtil;
+import io.vertx.core.json.JsonObject;
 import org.dom4j.Document;
 import org.dom4j.DocumentHelper;
 import org.dom4j.Element;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Controller;
 import org.springframework.ui.Model;
 import org.springframework.util.ResourceUtils;
@@ -16,6 +24,7 @@ import sun.rmi.runtime.Log;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 import static org.springframework.boot.Banner.Mode.LOG;
@@ -34,23 +43,17 @@ public class IOSUDIDController {
         return "DownLoadConfig";
     }
 
-    @RequestMapping("/resign/{udid}")
-    public void resign(@PathVariable(name = "udid") String udid, HttpServletResponse response) {
-        String cmd = "./test.sh " + udid;
-        try {
-            logger.info("start regsin");
-            Process pro = Runtime.getRuntime().exec(cmd,null,new File("/Users/hezhihui/Desktop/Project/CombodiaLife"));
-            int status = pro.waitFor();
-            if (status != 0){
-                logger.info("执行shell 命令出错");
-            }else {
-                logger.info("执行成功");
-            }
+    @RequestMapping("/newDevice/{udid}")
+    public void newDevice(@PathVariable(name = "udid") String udid, HttpServletResponse response) {
 
-        } catch (IOException | InterruptedException e) {
-            logger.info("执行出错");
-            e.printStackTrace();
+        boolean result = registerUdid(udid);
+        if (result){
+            logger.info("注册设备成功");
+        }else {
+            logger.info("注册设备失败");
         }
+
+        // 在这里触发打包脚本
 
         try {
             response.sendRedirect("/install");
@@ -97,31 +100,35 @@ public class IOSUDIDController {
 
     @PostMapping("/upload")
     @ResponseBody
-    public String upload(@RequestParam("file") MultipartFile file,HttpServletResponse response) throws FileNotFoundException {
+    public String upload(@RequestParam("file") MultipartFile file, @RequestParam("program") String program,  HttpServletResponse response) throws FileNotFoundException {
         if (file.isEmpty()) {
             return "上传失败，请选择文件";
         }
-
         //获取跟目录
         File path = new File(ResourceUtils.getURL("classpath:").getPath());
         if(!path.exists()) path = new File("");
         logger.info(path.getAbsolutePath());
 
         String fileName = file.getOriginalFilename();
-        String filePath = path.getAbsolutePath() + "/static/test.ipa";
+        String fileDir = path.getAbsolutePath() + "/static/" + program;
+        File dir = new File(fileDir);
+        if (!dir.exists()){
+            dir.mkdirs();
+        }
+        String filePath = fileDir + "/" + fileName;
         File dest = new File(filePath);
         try {
             file.transferTo(dest);
             logger.info("上传成功");
-            return "上传成功";
+            return "success";
         } catch (IOException e) {
             logger.error(e.toString(), e);
+            return "fail";
         }
-        return "上传失败！";
     }
 
     @RequestMapping("/app/parse_udid")
-    public void parseUdid(HttpServletRequest request,HttpServletResponse response) {
+    public void   parseUdid(HttpServletRequest request,HttpServletResponse response) {
 
         response.setContentType("text/html;charset=UTF-8");
         try {
@@ -129,6 +136,7 @@ public class IOSUDIDController {
         } catch (UnsupportedEncodingException e) {
             e.printStackTrace();
         }
+        logger.info("开始响应解析");
         //获取HTTP请求的输入流
         InputStream is = null;
         String udid = null;
@@ -193,12 +201,79 @@ public class IOSUDIDController {
         }
         response.setStatus(301);
         response.setHeader("Location","/hello/" + udid);
-
     }
 
     @RequestMapping("/install")
     public String installApp() {
 
         return "Install";
+    }
+
+//    @RequestMapping("/test")
+//    @ResponseBody
+    public boolean registerUdid(String device_udid) {
+        logger.info("注册设备...");
+        String token = JWTTokenUtil.createToken();
+        String result = null;
+
+        try {
+            result = HttpUtil.sendPostRequest("https://api.appstoreconnect.apple.com/v1/devices",token);
+            //在这里检测设备是否已经注册
+            JSONObject jsonObject = JSON.parseObject(result);
+            JSONArray devices = jsonObject.getJSONArray("data");
+            boolean isRegisted = false;
+            for(int i = 0;i < devices.size(); i++){
+                JSONObject device = devices.getJSONObject(i);
+                JSONObject attributes = device.getJSONObject("attributes");
+                if (attributes != null){
+                    String udid = attributes.getString("udid");
+                    String status = attributes.getString("status");
+                    if (udid == device_udid && status == "ENABLED"){
+                        isRegisted = true;
+                        break;
+                    }
+                }
+            }
+
+            if (isRegisted == false) {
+                boolean ret = registDevice(token,device_udid);
+                if (ret) {
+                    return true;
+                }else {
+                    return true;
+                }
+            }else {
+                return true;
+            }
+
+        } catch (IOException e) {
+            e.printStackTrace();
+            return  false;
+        }
+    }
+
+    private  boolean registDevice(String token,String udid) {
+        JSONObject jsonObject = new JSONObject();
+        JSONObject dataObject = new JSONObject();
+        dataObject.put("type","devices");
+        JSONObject attributeObject = new JSONObject();
+        attributeObject.put("name",udid);
+        attributeObject.put("platform","IOS");
+        attributeObject.put("udid",udid);
+        dataObject.put("attributes",attributeObject);
+        jsonObject.put("data",dataObject);
+        try {
+           String result = HttpUtil.sendPostWithJsonRequest("https://api.appstoreconnect.apple.com/v1/devices",jsonObject.toJSONString(),token);
+           logger.info(result);
+           JSONObject ret = JSON.parseObject(result);
+           if (ret.getJSONArray("errors") != null) {
+               return false;
+           }else {
+               return true;
+           }
+        } catch (IOException e) {
+            e.printStackTrace();
+            return false;
+        }
     }
 }
